@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Knowledge galaxy server — Python standard library only.
 
-    python3 server.py            -> http://127.0.0.1:4700
+    python3 server.py            -> http://127.0.0.1:4700  (opens your browser)
 
 * Serves ONLY the viewer/ folder as static files.
-* POST /chat        {"question": "...", "session": "..."}
-                    -> {"answer": "...", "nodes": [note indexes used]}
-* POST /chat/reset  {"session": "..."} clears that conversation's history.
+* The galaxy's own AI runs on this computer through Ollama (see brain.py).
+  No Claude, no OpenAI, no API keys; nothing you ask leaves this machine.
+* GET  /brain/status  what the brain is doing (downloading, ready, ...)
+* POST /chat         {"question": "...", "session": "..."}
+                     -> streamed NDJSON: step / token events, then
+                        {"type": "done", "answer": "...", "nodes": [note indexes used]}
+* POST /think        {"session": "..."} -> the brain reads every note on its own and
+                     streams back {"type": "insights", "insights": [...]}
+* POST /chat/reset   {"session": "..."} clears that conversation's history.
 
-The OpenAI key lives in ./config.json (project root, outside viewer/), is read
-fresh on every request, and is never sent to the browser.
+config.json (project root, never served): {"model": "qwen2.5:3b"}
 """
 import collections
 import json
@@ -18,13 +23,13 @@ import os
 import re
 import sys
 import threading
-import urllib.error
-import urllib.request
 import webbrowser
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
+import brain
 import build
+from brain import BrainError
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 VIEWER_DIR = os.path.realpath(os.path.join(ROOT, "viewer"))
@@ -32,28 +37,63 @@ CONFIG_PATH = os.path.join(ROOT, "config.json")
 HOST = os.environ.get("GALAXY_HOST", "127.0.0.1")
 PORT = int(os.environ.get("GALAXY_PORT", "4700"))
 
-PLACEHOLDER_KEY = "PUT-YOUR-KEY-HERE"
-DEFAULT_CONFIG = {"openai_api_key": PLACEHOLDER_KEY, "model": "gpt-6-astra"}
-OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+DEFAULT_CONFIG = {"model": brain.DEFAULT_MODEL}
 
 TOP_K = 6
-NOTE_CHARS_FOR_MODEL = 3000
+MAX_NOTES_READ = 4
+NOTE_CHARS_FOR_MODEL = 2500
+NOTE_CHARS_FOR_THINK = 1500
 HISTORY_MESSAGES = 6          # last 3 question/answer pairs per conversation
 MAX_SESSIONS = 200
 MAX_BODY_BYTES = 16 * 1024
 MAX_QUESTION_CHARS = 1000
 
-SYSTEM_PROMPT = """You are a smart, friendly AI assistant living inside the user's "knowledge galaxy" of notes.
-The user can ask you ANYTHING: questions about their notes, general questions, advice, ideas, writing help, maths.
-Think for yourself:
-- When the question touches the notes below, use them and reason across them: connect dots, spot conflicts and implications, do the arithmetic. Say "From your notes..." for facts taken from notes, and never invent facts about the user's business that the notes do not contain.
-- For everything else, answer from your own knowledge like any capable assistant.
-Be conversational and concise: usually two to five sentences, plain text, no markdown headings.
-Earlier turns of this conversation are included so you can resolve follow-up questions.
-On the very last line write "SOURCES:" followed by the bracketed ids of the notes you actually used, comma-separated (e.g. "SOURCES: 7, 12"), or "SOURCES: none".
+IDENTITY = """You are the Knowledge Galaxy's own AI. You run entirely on the user's own computer ({model}, an open model running privately through Ollama). You are not ChatGPT, Claude, Gemini or any online service, and nothing the user types leaves their computer. If asked what you are, say that."""
+
+ANSWER_PROMPT = IDENTITY + """
+
+The user can ask you anything: questions about their notes (a small coffee roastery and café business), general knowledge, advice, ideas, writing help, maths, small talk. Think for yourself.
+- If notes are given below, use them and reason across them: connect dots, notice conflicts, do the arithmetic. Say "From your notes..." for facts that come from them. Never invent facts about the user's business.
+- If no notes are given, or they don't fit the question, answer from your own knowledge like any capable assistant.
+- Be conversational and concise: usually two to five sentences. Plain text, no markdown headings or tables.
+- After your answer, write one last line: SOURCES: then the numbers of the notes you used, e.g. "SOURCES: 7, 12", or "SOURCES: none".
+
+{notes}"""
+
+PICK_PROMPT = """You help an AI decide which of the user's notes to open before it answers.
+The notes (number, title, folder, start of text):
+{catalogue}
+
+Earlier in the conversation the user asked: {previous}
+Latest message: {question}
+
+Which notes, if any, would help answer the latest message? Pick at most {k}, most useful first.
+If the message is general knowledge, chit-chat or otherwise not about the user's business, pick none.
+Reply with JSON only: {{"notes": [numbers]}}"""
+
+PICK_SCHEMA = {"type": "object", "properties": {"notes": {"type": "array", "items": {"type": "integer"}}},
+               "required": ["notes"]}
+
+THINK_PROMPT = IDENTITY + """
+
+Nobody has asked you anything. Think for yourself: read all of the user's notes below and find the 4 things the owner most needs to notice right now that are NOT obvious from any single note: plans that collide with cash, promises that conflict, risks building up, opportunities hiding across notes. Each one must connect at least two notes, cite concrete facts (dates, amounts, names) and say what you would do about it. Use only facts that are in the notes.
+
+Reply with JSON only, in this shape:
+{{"insights": [{{"kind": "risk | conflict | opportunity | connection", "headline": "at most 9 words", "detail": "2-3 plain sentences", "notes": [note numbers]}}]}}
 
 NOTES:
 {notes}"""
+
+THINK_SCHEMA = {
+    "type": "object",
+    "properties": {"insights": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"kind": {"type": "string", "enum": ["risk", "conflict", "opportunity", "connection"]},
+                       "headline": {"type": "string"}, "detail": {"type": "string"},
+                       "notes": {"type": "array", "items": {"type": "integer"}}},
+        "required": ["kind", "headline", "detail", "notes"]}}},
+    "required": ["insights"],
+}
 
 STOPWORDS = set("""
 a about above after again against all am an and any are as at be because been before being below between both but by
@@ -85,8 +125,12 @@ class NoteIndex:
         self.notes = notes
         self.title_tokens = [set(tokenize(n["label"])) for n in notes]
         self.body_counts = [collections.Counter(tokenize(n["text"])) for n in notes]
+        self.catalogue = "\n".join(
+            "[%d] %s (%s): %s" % (n["id"], n["label"], n["group"], " ".join(body_only(n).split())[:100])
+            for n in notes)
 
-    def score(self, question, previous_question=""):
+    def ranked(self, question, previous_question=""):
+        """[(note index, score)] best first, by keyword overlap; title matches weigh more."""
         terms = collections.Counter()
         for t in set(tokenize(question)):
             terms[t] += 1.0
@@ -98,7 +142,7 @@ class NoteIndex:
             s = 0.0
             for term, weight in terms.items():
                 if term in self.title_tokens[i]:
-                    s += 3.0 * weight                      # title matches weigh more
+                    s += 3.0 * weight
                 tf = self.body_counts[i].get(term, 0)
                 if tf:
                     s += weight * (1.0 + math.log(tf))
@@ -106,24 +150,40 @@ class NoteIndex:
             if title_phrase.strip() and title_phrase in q_lower:
                 s += 6.0                                   # whole title named in the question
             if s > 0:
-                scored.append((s, i))
-        scored.sort(key=lambda x: (-x[0], x[1]))
-        return [i for _, i in scored[:TOP_K]]
+                scored.append((i, s))
+        scored.sort(key=lambda x: (-x[1], x[0]))
+        return scored[:TOP_K]
+
+    def named_in(self, question):
+        """Notes whose full title appears in the question, e.g. "what's in the Hiring Plan?"."""
+        q = _words(question)
+        return [i for i, n in enumerate(self.notes) if _words(n["label"]).strip() and _words(n["label"]) in q]
+
+
+def _words(text):
+    return " " + " ".join(re.findall(r"[a-z0-9]+", text.lower())) + " "
+
+
+def body_only(note):
+    """Note text without a first line that just repeats the title."""
+    first, _, rest = note["text"].partition("\n")
+    return rest.strip() if build.normalize(first) == build.normalize(note["label"]) else note["text"]
 
 
 def load_config():
-    if not os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(DEFAULT_CONFIG, f, indent=2)
-            f.write("\n")
-    with open(CONFIG_PATH, encoding="utf-8") as f:
-        cfg = json.load(f)
-    return cfg
-
-
-def key_is_placeholder(key):
-    key = (key or "").strip()
-    return not key or key == PLACEHOLDER_KEY or "PUT-YOUR" in key.upper()
+    """Read config.json, creating it (or replacing the old OpenAI placeholder file) when needed."""
+    cfg = None
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            cfg = json.load(f)
+        old_placeholder = (isinstance(cfg, dict) and "openai_api_key" in cfg
+                           and "PUT-YOUR" in str(cfg.get("openai_api_key", "")).upper())
+        if not old_placeholder:
+            return cfg if isinstance(cfg, dict) else {}
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(DEFAULT_CONFIG, f, indent=2)
+        f.write("\n")
+    return dict(DEFAULT_CONFIG)
 
 
 class ChatError(Exception):
@@ -132,52 +192,20 @@ class ChatError(Exception):
         self.status, self.message, self.code = status, message, code
 
 
-def call_openai(api_key, model, messages):
-    body = json.dumps({"model": model, "messages": messages}).encode("utf-8")
-    req = urllib.request.Request(OPENAI_URL, data=body, method="POST", headers={
-        "Authorization": "Bearer " + api_key,
-        "Content-Type": "application/json",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            detail = json.loads(e.read().decode("utf-8")).get("error", {}).get("message", "")
-        except Exception:
-            pass
-        if e.code == 401:
-            raise ChatError(502, "OpenAI rejected the API key in config.json (401). Check it and try again.", "bad_api_key")
-        if e.code == 404 or "model" in detail.lower():
-            raise ChatError(502, f"OpenAI could not use model '{model}': {detail or e.reason}. "
-                                 "Change \"model\" in config.json.", "bad_model")
-        if e.code == 429:
-            raise ChatError(502, "OpenAI rate limit or quota reached (429). " + detail, "rate_limited")
-        raise ChatError(502, f"OpenAI error {e.code}: {detail or e.reason}", "openai_error")
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        reason = getattr(e, "reason", e)
-        raise ChatError(502, f"Could not reach the OpenAI API: {reason}", "network_error")
-    try:
-        return data["choices"][0]["message"]["content"] or ""
-    except (KeyError, IndexError, TypeError):
-        raise ChatError(502, "OpenAI returned an unexpected response.", "openai_error")
+SOURCES_RE = re.compile(r"^\W*sources\W*:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
 
 
-SOURCES_RE = re.compile(r"^\s*\**sources\**\s*:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
-
-
-def split_sources(text, allowed):
-    """Pull the SOURCES line off the model's reply -> (answer, [ids])."""
+def split_sources(text, read):
+    """Pull the SOURCES line off the reply -> (answer, [note ids used])."""
     matches = list(SOURCES_RE.finditer(text))
     if not matches:
-        return text.strip(), list(allowed)
+        return text.strip(), list(read)
     m = matches[-1]
     answer = (text[:m.start()] + text[m.end():]).strip()
-    ids = [int(x) for x in re.findall(r"\d+", m.group(1))]
     used = []
-    for i in ids:
-        if i in allowed and i not in used:
+    for x in re.findall(r"\d+", m.group(1)):
+        i = int(x)
+        if i in read and i not in used:
             used.append(i)
     return answer, used
 
@@ -210,12 +238,24 @@ class Conversations:
             self.sessions.pop(sid, None)
 
 
+class ClientGone(Exception):
+    """The browser closed the connection (Stop button, closed tab)."""
+
+
 # --------------------------------------------------------------------------- HTTP
 
 class Handler(SimpleHTTPRequestHandler):
-    server_version = "KnowledgeGalaxy/1.0"
+    server_version = "KnowledgeGalaxy/2.0"
     index = None
     conversations = None
+    brain = None
+
+    # ---- guard: only answer requests addressed to this machine (blocks DNS-rebinding pages)
+    def host_ok(self):
+        if HOST not in ("127.0.0.1", "localhost", "::1"):
+            return True
+        host = (self.headers.get("Host") or "").lower()
+        return host in {f"127.0.0.1:{PORT}", f"localhost:{PORT}", f"[::1]:{PORT}"}
 
     # ---- static files: viewer/ only
     def translate_path(self, path):
@@ -239,7 +279,19 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
 
-    # ---- JSON API
+    def do_GET(self):
+        if not self.host_ok():
+            return self.send_json(403, {"error": "Forbidden", "code": "forbidden"})
+        if self.path.split("?", 1)[0] == "/brain/status":
+            return self.send_json(200, self.brain.status())
+        return super().do_GET()
+
+    def do_HEAD(self):
+        if not self.host_ok():
+            return self.send_json(403, {"error": "Forbidden", "code": "forbidden"})
+        return super().do_HEAD()
+
+    # ---- JSON + streaming helpers
     def send_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -247,6 +299,20 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def start_stream(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.close_connection = True          # HTTP/1.0: the stream ends when we close
+
+    def emit(self, **event):
+        try:
+            self.wfile.write((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            raise ClientGone()
 
     def read_json(self):
         ctype = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
@@ -270,83 +336,225 @@ class Handler(SimpleHTTPRequestHandler):
             raise ChatError(400, "Request body must be a JSON object.", "bad_request")
         return data
 
+    def session_id(self, data):
+        return re.sub(r"[^A-Za-z0-9_-]", "", str(data.get("session", "default")))[:64] or "default"
+
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        streaming = False
         try:
+            if not self.host_ok():
+                raise ChatError(403, "Forbidden.", "forbidden")
             if path == "/chat":
-                self.handle_chat(self.read_json())
+                data = self.read_json()
+                question = str(data.get("question", "")).strip()
+                if not question:
+                    raise ChatError(400, "Ask a question first.", "bad_request")
+                if len(question) > MAX_QUESTION_CHARS:
+                    raise ChatError(400, f"Question is too long (max {MAX_QUESTION_CHARS} characters).", "bad_request")
+                model = self.ready_model_or_error()
+                self.start_stream(); streaming = True
+                self.stream_chat(self.session_id(data), question, model)
+            elif path == "/think":
+                data = self.read_json()
+                model = self.ready_model_or_error()
+                self.start_stream(); streaming = True
+                self.stream_think(self.session_id(data), model)
             elif path == "/chat/reset":
                 data = self.read_json()
-                self.conversations.reset(str(data.get("session", ""))[:64])
+                self.conversations.reset(self.session_id(data))
                 self.send_json(200, {"ok": True})
             else:
                 self.send_json(404, {"error": "Not found", "code": "not_found"})
+        except ClientGone:
+            pass                                   # Stop button: nothing to answer
         except ChatError as e:
-            self.send_json(e.status, {"error": e.message, "code": e.code, "nodes": getattr(e, "nodes", [])})
+            if streaming:
+                self.safe_emit(type="error", code=e.code, error=e.message)
+            else:
+                self.send_json(e.status, {"error": e.message, "code": e.code})
+        except BrainError as e:
+            if e.code in ("ollama_down", "model_missing"):
+                self.brain.mark_down(e.message)
+            msg = friendly_brain_error(e)
+            if streaming:
+                self.safe_emit(type="error", code=e.code, error=msg)
+            else:
+                self.send_json(503, {"error": msg, "code": e.code})
         except Exception as e:  # never let one bad request take the server down
-            self.log_message("chat failed: %r", e)
-            self.send_json(500, {"error": "Internal error while answering. See the server log.", "code": "internal"})
+            self.log_message("request failed: %r", e)
+            if streaming:
+                self.safe_emit(type="error", code="internal", error="Something went wrong inside the brain. See the server window.")
+            else:
+                self.send_json(500, {"error": "Internal error. See the server window.", "code": "internal"})
+
+    def safe_emit(self, **event):
+        try:
+            self.emit(**event)
+        except ClientGone:
+            pass
 
     def do_PUT(self):
         self.send_json(405, {"error": "Method not allowed"})
     do_DELETE = do_PATCH = do_PUT
 
-    def handle_chat(self, data):
-        question = str(data.get("question", "")).strip()
-        sid = re.sub(r"[^A-Za-z0-9_-]", "", str(data.get("session", "default")))[:64] or "default"
-        if not question:
-            raise ChatError(400, "Ask a question first.", "bad_request")
-        if len(question) > MAX_QUESTION_CHARS:
-            raise ChatError(400, f"Question is too long (max {MAX_QUESTION_CHARS} characters).", "bad_request")
-
-        history, last_question = self.conversations.get(sid)
-        top = self.index.score(question, last_question)
-
+    def ready_model_or_error(self):
         try:
-            cfg = load_config()
-        except (OSError, ValueError) as e:
-            err = ChatError(500, f"config.json could not be read: {e}", "bad_config")
-            err.nodes = top
-            raise err
-        api_key = str(cfg.get("openai_api_key", ""))
-        model = str(cfg.get("model", "")).strip() or DEFAULT_CONFIG["model"]
-        if key_is_placeholder(api_key):
-            err = ChatError(503, "No OpenAI API key yet. Paste your key into config.json in the project "
-                                 "root (replacing PUT-YOUR-KEY-HERE) and ask again. No restart needed.",
-                            "missing_api_key")
-            err.nodes = top   # the viewer can still light up the notes it would have used
-            raise err
+            return self.brain.ready_model()
+        except BrainError as e:
+            st = self.brain.status()
+            raise ChatError(503, st.get("message") or e.message, e.code)
 
+    # ---- the brain at work
+    def pick_notes(self, ollama, model, question, last_question, history):
+        """The brain decides for itself which notes to open. Keyword search is the safety net."""
+        ranked = self.index.ranked(question, last_question)
+        previous = last_question or "(nothing yet)"
+        prompt = PICK_PROMPT.format(catalogue=self.index.catalogue, previous=previous,
+                                    question=question, k=MAX_NOTES_READ)
+        picked = None
+        try:
+            reply = ollama.chat_json(model, [{"role": "user", "content": prompt}], PICK_SCHEMA)
+            raw = reply.get("notes", []) if isinstance(reply, dict) else []
+            picked = []
+            for x in raw:
+                try:
+                    i = int(x)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= i < len(self.index.notes) and i not in picked:
+                    picked.append(i)
+        except BrainError as e:
+            if e.code in ("ollama_down", "model_missing"):
+                raise
+            picked = None                        # the picker stumbled: fall back to keywords
+        if picked is None:
+            picked = [i for i, s in ranked if s >= 3][:3]
+        # A note named outright in the question is always worth opening.
+        for i in reversed(self.index.named_in(question)):
+            if i not in picked:
+                picked.insert(0, i)
+        return picked[:MAX_NOTES_READ]
+
+    def stream_chat(self, sid, question, model):
+        _, ollama = self.brain.client()
+        history, last_question = self.conversations.get(sid)
         notes = self.index.notes
-        context = "\n\n".join(
-            f"[{i}] {notes[i]['label']} (folder: {notes[i]['group']})\n{notes[i]['text'][:NOTE_CHARS_FOR_MODEL]}"
-            for i in top
-        ) or "(no notes matched this message; answer from your own knowledge)"
-        messages = [{"role": "system", "content": SYSTEM_PROMPT.format(notes=context)}]
+
+        self.emit(type="step", verb="Thinking", text="deciding which notes to open")
+        picked = self.pick_notes(ollama, model, question, last_question, history)
+        for i in picked:
+            self.emit(type="step", verb="Read", id=i)
+        if not picked:
+            self.emit(type="step", verb="Answering", text="from its own knowledge")
+
+        if picked:
+            context = "Notes you opened for this question:\n\n" + "\n\n".join(
+                f"[{i}] {notes[i]['label']} (folder: {notes[i]['group']})\n{body_only(notes[i])[:NOTE_CHARS_FOR_MODEL]}"
+                for i in picked)
+        else:
+            context = "No notes were opened for this question."
+        messages = [{"role": "system", "content": ANSWER_PROMPT.format(model=model, notes=context)}]
         messages += history
         messages.append({"role": "user", "content": question})
 
+        text = ""
+        holder = {}
         try:
-            reply = call_openai(api_key, model, messages)
-        except ChatError as e:
-            e.nodes = top
+            for piece in ollama.chat_stream(model, messages, on_open=lambda r: holder.setdefault("resp", r)):
+                text += piece
+                self.emit(type="token", text=piece)
+        except ClientGone:
+            if holder.get("resp"):
+                holder["resp"].close()             # stop generating on Stop
             raise
-        answer, used = split_sources(reply, top)
+        answer, used = split_sources(text, picked)
         if not answer:
             answer = "I'm not sure how to answer that one. Try asking another way."
         self.conversations.append(sid, question, answer)
-        self.send_json(200, {"answer": answer, "nodes": used})
+        self.emit(type="done", answer=answer, nodes=used)
+
+    def stream_think(self, sid, model):
+        _, ollama = self.brain.client()
+        notes = self.index.notes
+        self.emit(type="step", verb="Reading", text=f"all {len(notes)} notes")
+        body = "\n\n".join(f"[{n['id']}] {n['label']} ({n['group']})\n{body_only(n)[:NOTE_CHARS_FOR_THINK]}" for n in notes)
+        prompt = THINK_PROMPT.format(model=model, notes=body)
+        text, chars = "", 0
+        holder = {}
+        try:
+            for piece in ollama.chat_stream(model, [{"role": "user", "content": prompt}], num_ctx=12288,
+                                            fmt=THINK_SCHEMA, on_open=lambda r: holder.setdefault("resp", r)):
+                text += piece
+                if len(text) - chars > 40:         # heartbeat so the page knows it's writing
+                    chars = len(text)
+                    self.emit(type="progress", chars=chars)
+        except ClientGone:
+            if holder.get("resp"):
+                holder["resp"].close()
+            raise
+        insights = clean_insights(text, len(notes))
+        if not insights:
+            raise ChatError(502, "The brain's thoughts came out jumbled. Press Let it think to try again.", "bad_json")
+        self.emit(type="insights", insights=insights)
+        summary = "\n".join(f"{k + 1}. {x['headline']}: {x['detail']} (notes {', '.join(map(str, x['notes']))})"
+                            for k, x in enumerate(insights))
+        self.conversations.append(sid, "Look through all my notes and tell me what you notice on your own.", summary)
+        self.emit(type="done", nodes=sorted({i for x in insights for i in x["notes"]}))
+
+
+def clean_insights(text, note_count):
+    text = brain.strip_think(text)
+    try:
+        data = json.loads(text)
+    except ValueError:
+        m = re.search(r"\{.*\}", text, re.S)
+        try:
+            data = json.loads(m.group(0)) if m else {}
+        except ValueError:
+            data = {}
+    items = data.get("insights") if isinstance(data, dict) else data if isinstance(data, list) else []
+    out = []
+    for x in items or []:
+        if not isinstance(x, dict) or not str(x.get("headline", "")).strip():
+            continue
+        ids = []
+        for n in x.get("notes") or []:
+            try:
+                i = int(n)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < note_count and i not in ids:
+                ids.append(i)
+        kind = str(x.get("kind", "connection")).lower()
+        out.append({"kind": kind if kind in ("risk", "conflict", "opportunity", "connection") else "connection",
+                    "headline": str(x["headline"]).strip()[:120], "detail": str(x.get("detail", "")).strip()[:700],
+                    "notes": ids})
+    return out[:6]
+
+
+def friendly_brain_error(e):
+    if e.code == "ollama_down":
+        return "I lost touch with Ollama, the app that runs my brain. Is it still open? I'll reconnect by myself."
+    if e.code == "model_missing":
+        return "My brain isn't downloaded yet. The galaxy is fetching it now; watch the status in the top-left."
+    return f"My brain hit a problem: {e.message}"
 
 
 def main():
     notes, nodes, links = build.build()          # re-index so node ids match what we score
-    load_config()                                # creates config.json with the placeholder if missing
+    load_config()                                # creates config.json if missing
     Handler.index = NoteIndex(notes)
     Handler.conversations = Conversations()
+    Handler.brain = brain.BrainManager(load_config)
+    Handler.brain.start()
     handler = partial(Handler, directory=VIEWER_DIR)
     httpd = ThreadingHTTPServer((HOST, PORT), handler)
+    httpd.daemon_threads = True
+    model, _ = Handler.brain.settings()
     print(f"Knowledge galaxy: http://{HOST if HOST != '0.0.0.0' else 'localhost'}:{PORT}  "
           f"({len(nodes)} notes, {len(links)} links)  Ctrl+C to stop")
+    print(f"Brain: {model}, running on this computer through Ollama ({brain.DOWNLOAD_PAGE})")
     if os.environ.get("GALAXY_NO_BROWSER") != "1":
         url = f"http://127.0.0.1:{PORT}/"
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()   # open the galaxy for you

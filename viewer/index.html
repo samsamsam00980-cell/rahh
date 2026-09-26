@@ -6,6 +6,7 @@
 <title>Knowledge Galaxy</title>
 <style>
   :root {
+    color-scheme: dark;
     --bg: #000006;
     --panel: rgba(10, 12, 24, 0.78);
     --panel-border: rgba(140, 160, 255, 0.18);
@@ -97,6 +98,40 @@
     #panel { top: auto; left: 16px; right: 16px; bottom: 90px; width: auto; max-height: 55vh; transform: translateY(calc(100% + 120px)); }
     #chat { bottom: 14px; }
   }
+
+  /* ---------- brain */
+  .brain-pill { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--panel-border); display: grid; gap: 6px; font-size: 12px; }
+  .brain-pill .row { display: flex; align-items: baseline; gap: 7px; line-height: 1.4; }
+  .brain-pill .label { letter-spacing: 0.14em; text-transform: uppercase; font-size: 10.5px; color: var(--muted); }
+  .brain-pill .light { width: 8px; height: 8px; border-radius: 50%; flex: none; align-self: center; background: #ffcf70; box-shadow: 0 0 8px currentColor; color: #ffcf70; animation: breathe 1.6s ease-in-out infinite; }
+  .brain-pill[data-state="ready"] .light { background: #72efdd; color: #72efdd; animation: none; }
+  .brain-pill[data-state="no_ollama"] .light, .brain-pill[data-state="error"] .light { background: #ff8a7a; color: #ff8a7a; animation: none; }
+  .brain-pill[data-state="offline"] .light { background: var(--muted); color: transparent; animation: none; }
+  .brain-pill .bar { height: 4px; border-radius: 4px; background: rgba(255,255,255,0.08); overflow: hidden; }
+  .brain-pill .bar span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #9bc0ff, #c59bff); transition: width 0.6s ease; }
+  .brain-pill a { color: var(--accent); font-weight: 600; text-decoration: none; }
+  .brain-pill a:hover { text-decoration: underline; }
+  @keyframes breathe { 50% { opacity: 0.35; } }
+  #ask button.ghost { background: transparent; color: var(--text); border: 1px solid var(--panel-border); font-weight: 500; }
+  #ask button.ghost:hover:not(:disabled) { background: rgba(255,255,255,0.07); filter: none; }
+  #ask button.stop { background: #2a2f4a; color: var(--text); }
+  #ask input:disabled { opacity: 0.6; }
+  #answer .q:empty, #trail:empty, #insights:empty, #answer .a:empty { display: none; }
+  #trail { display: flex; flex-direction: column; gap: 4px; margin: 2px 0 10px; padding-left: 10px; border-left: 1px solid var(--panel-border); }
+  .step { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); animation: rise 0.3s ease; }
+  .step .verb { min-width: 72px; letter-spacing: 0.08em; text-transform: uppercase; font-size: 10.5px; }
+  .step .chip { padding: 2px 8px; font-size: 11.5px; }
+  #insights { display: grid; gap: 8px; margin-top: 4px; }
+  .insight { display: grid; gap: 4px; text-align: left; font-family: inherit; color: var(--text); background: rgba(255,255,255,0.035); border: 1px solid var(--panel-border); border-radius: 10px; padding: 10px 12px; cursor: pointer; animation: rise 0.35s ease both; }
+  .insight:hover, .insight.active { background: rgba(255,255,255,0.08); border-color: rgba(160,180,255,0.4); }
+  .insight .kind { font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); }
+  .insight .kind.risk { color: #ff8a7a; } .insight .kind.conflict { color: var(--warn); } .insight .kind.opportunity { color: #72efdd; }
+  .insight .headline { font-size: 14.5px; font-weight: 600; }
+  .insight .detail { font-size: 13px; line-height: 1.55; color: #d5dbf5; }
+  .insight .on { font-size: 11.5px; color: var(--muted); }
+  body.brain-busy #ask { border-color: rgba(197,155,255,0.5); box-shadow: 0 0 30px rgba(155,120,255,0.25), 0 10px 40px rgba(0,0,0,0.5); }
+  @media (max-width: 720px) { #ask button { padding: 10px 12px; } #ask button.ghost { font-size: 13px; } .brain-pill { margin-top: 8px; padding-top: 8px; } }
+  @media (prefers-reduced-motion: reduce) { .step, .insight, #answer.show { animation: none; } .brain-pill .light { animation: none; } }
 </style>
 </head>
 <body>
@@ -106,6 +141,11 @@
   <h1>Knowledge Galaxy</h1>
   <div class="stats" id="stats"></div>
   <div id="legend"></div>
+  <div id="brain-status" class="brain-pill" data-state="checking" aria-live="polite">
+    <div class="row"><span class="light"></span><span class="label">Brain</span><span id="brain-text">Checking…</span></div>
+    <div id="brain-bar" class="bar" hidden><span></span></div>
+    <a id="brain-link" target="_blank" rel="noopener" hidden></a>
+  </div>
   <div class="hint">Drag to orbit · scroll to zoom · click a star to open it</div>
 </div>
 
@@ -122,12 +162,15 @@
 <div id="chat">
   <div id="answer" class="glass" aria-live="polite">
     <div class="q" id="answer-q"></div>
+    <div id="trail"></div>
     <div class="a" id="answer-a"></div>
+    <div id="insights"></div>
     <div class="sources" id="answer-sources"></div>
     <div class="actions"><button class="link-btn" id="new-convo" title="Forget this conversation">New conversation</button></div>
   </div>
   <form id="ask" class="glass" autocomplete="off">
     <input id="question" name="question" type="text" maxlength="1000" placeholder="Ask me anything: your notes, ideas, advice…" aria-label="Ask your notes">
+    <button id="think" type="button" class="ghost" title="The brain reads every note and tells you what it notices, without being asked">Let it think</button>
     <button id="send" type="submit">Ask</button>
   </form>
 </div>
@@ -246,7 +289,31 @@ const graph = new ForceGraph3D($("graph"), { controlType: "orbit" })
 graph.d3Force("charge").strength(-140);
 graph.d3Force("link").distance(55);
 
-addEventListener("resize", () => graph.width(innerWidth).height(innerHeight));
+// Keep the interesting part of the galaxy clear of the answer card and side panel:
+// shift the camera's view (not the camera) so the scene centres in the open space.
+const viewOffset = { x: 0, y: 0, tx: 0, ty: 0, raf: 0 };
+function applyViewOffset() {
+  graph.camera().setViewOffset(innerWidth, innerHeight, viewOffset.x, viewOffset.y, innerWidth, innerHeight);
+}
+function updateViewOffset() {
+  const card = document.getElementById("answer");
+  const panel = document.getElementById("panel");
+  const cardTop = card && card.classList.contains("show") ? card.getBoundingClientRect().top : innerHeight;
+  viewOffset.ty = Math.max(0, Math.round((innerHeight - cardTop) / 2) - 10);
+  viewOffset.tx = panel && panel.classList.contains("open") && innerWidth > 720 ? Math.round(panel.offsetWidth / 2) : 0;
+  if (viewOffset.raf) return;
+  const step = () => {
+    viewOffset.x += (viewOffset.tx - viewOffset.x) * 0.12;
+    viewOffset.y += (viewOffset.ty - viewOffset.y) * 0.12;
+    if (Math.abs(viewOffset.tx - viewOffset.x) < 0.5 && Math.abs(viewOffset.ty - viewOffset.y) < 0.5) {
+      viewOffset.x = viewOffset.tx; viewOffset.y = viewOffset.ty; viewOffset.raf = 0;
+    } else viewOffset.raf = requestAnimationFrame(step);
+    applyViewOffset();
+  };
+  viewOffset.raf = requestAnimationFrame(step);
+}
+addEventListener("resize", () => { graph.width(innerWidth).height(innerHeight); applyViewOffset(); updateViewOffset(); });
+if (window.ResizeObserver) new ResizeObserver(updateViewOffset).observe(document.getElementById("answer"));
 
 const graphNodes = graph.graphData().nodes;      // same order as GRAPH.nodes
 const byId = (id) => graphNodes[id];
@@ -345,7 +412,9 @@ function showSet(ids, frame) {
   closePanel();
   if (frame && ids.size) {
     pinned = true; pauseRotation(0);
-    graph.zoomToFit(1400, ids.size === 1 ? 260 : 140, (n) => ids.has(n.id));
+    const card = document.getElementById("answer");
+    const cardH = card.classList.contains("show") ? innerHeight - card.getBoundingClientRect().top : 0;
+    graph.zoomToFit(1400, Math.max(ids.size === 1 ? 260 : 140, Math.round(cardH / 2) + 50), (n) => ids.has(n.id));
   }
 }
 
@@ -375,17 +444,22 @@ function openPanel(n) {
   $("neighbours-heading").textContent = neighbours[n.id].size ? `Connected notes (${neighbours[n.id].size})` : "No connections yet";
   $("panel").classList.add("open");
   document.body.classList.add("panel-open");
+  updateViewOffset();
   $("panel").setAttribute("aria-hidden", "false");
 }
 function closePanel() {
   $("panel").classList.remove("open");
   document.body.classList.remove("panel-open");
+  updateViewOffset();
   $("panel").setAttribute("aria-hidden", "true");
 }
 $("panel-close").onclick = clearFocus;
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") clearFocus(); });
 
-// ------------------------------------------------------------------ chat
+// ------------------------------------------------------------------ brain (the galaxy's own AI, running on this computer)
+const ON_THIS_COMPUTER = location.protocol === "http:" && /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname);
+const GET_IT = "https://github.com/samsamsam00980-cell/rahh/tree/claude/lucid-pascal-aeh7ue";
+
 let sessionId = null;
 try { sessionId = sessionStorage.getItem("galaxy-session"); } catch {}
 if (!sessionId) {
@@ -393,16 +467,86 @@ if (!sessionId) {
   try { sessionStorage.setItem("galaxy-session", sessionId); } catch {}
 }
 
-function showAnswer({ question, text, ids = [], error = false, label = "Sources" }) {
+// ---- status pill in the top-left panel
+let brainState = "checking";
+function setPill(state, text, link, progress) {
+  brainState = state;
+  const pill = $("brain-status");
+  pill.dataset.state = state;
+  $("brain-text").textContent = text;
+  const a = $("brain-link");
+  a.hidden = !link;
+  if (link) { a.href = link.href; a.textContent = link.label; }
+  $("brain-bar").hidden = !(progress >= 0);
+  $("brain-bar").firstElementChild.style.width = Math.round((progress || 0) * 100) + "%";
+}
+async function pollBrain() {
+  if (!ON_THIS_COMPUTER) {
+    setPill("offline", "Its brain lives on your computer. Download the galaxy to talk to it.", { href: GET_IT, label: "Get the galaxy" });
+    $("question").disabled = true; $("send").disabled = true; $("think").disabled = true;
+    $("question").placeholder = "Download the galaxy to talk to its brain";
+    return;
+  }
+  let next = 2000;
+  try {
+    const r = await fetch("brain/status", { cache: "no-store" });
+    const st = await r.json();
+    const link = st.link ? { href: st.link, label: "Get Ollama (free)" } : null;
+    setPill(st.state, st.message || st.state, link, st.state === "downloading" ? st.progress || 0 : undefined);
+    if (st.state === "ready") next = 15000;
+  } catch {
+    setPill("error", "The galaxy's server stopped. Double-click start again.");
+    next = 5000;
+  }
+  setTimeout(pollBrain, next);
+}
+pollBrain();
+
+// ---- thinking visuals: neurons firing across the galaxy
+let pulseRaf = null;
+function setThinking(on) {
+  document.body.classList.toggle("brain-busy", on);
+  cancelAnimationFrame(pulseRaf);
+  if (!on) { applyHighlight(); return; }
+  const fire = new Map();
+  const tick = () => {
+    if (Math.random() < 0.18) fire.set((Math.random() * graphNodes.length) | 0, 1);
+    fire.forEach((v, id) => {
+      const n = graphNodes[id];
+      if (!n?.__glow) return;
+      const base = n.__r * (n.id === focusId ? 11 : highlight && highlight.has(n.id) ? 8.5 : 7);
+      const next = v - 0.035;
+      n.__glow.scale.setScalar(base * (1 + Math.max(next, 0) * 0.9));
+      if (next <= 0) fire.delete(id); else fire.set(id, next);
+    });
+    pulseRaf = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+// ---- answer card
+function addStep(verb, what, id) {
+  const row = document.createElement("div");
+  row.className = "step";
+  const v = document.createElement("span"); v.className = "verb"; v.textContent = verb;
+  row.append(v);
+  if (id != null && nodes[id]) row.append(chip(id));
+  else { const w = document.createElement("span"); w.textContent = what || ""; row.append(w); }
+  $("trail").append(row);
+  $("answer").scrollTop = $("answer").scrollHeight;
+}
+
+function showAnswer({ question, text, ids = [], error = false, label = "From your notes", keepTrail = false }) {
   const box = $("answer");
   box.classList.add("show");
   box.classList.toggle("error", error);
-  $("answer-q").textContent = question ? "You asked: " + question : "";
-  $("answer-a").textContent = text;
-  $("answer-a").classList.toggle("thinking", text === "Searching your notes");
+  $("answer-q").textContent = question || "";
+  if (!keepTrail) $("trail").replaceChildren();
+  setAnswerText(text);
+  $("insights").replaceChildren();
   const src = $("answer-sources");
   src.replaceChildren();
-  const valid = ids.filter((i) => Number.isInteger(i) && nodes[i]);
+  const valid = [...new Set(ids)].filter((i) => Number.isInteger(i) && nodes[i]);
   if (valid.length) {
     const l = document.createElement("div");
     l.className = "sources-label"; l.textContent = label;
@@ -412,38 +556,156 @@ function showAnswer({ question, text, ids = [], error = false, label = "Sources"
     src.append(l, wrap);
   }
 }
+function setAnswerText(text, waiting) {
+  $("answer-a").textContent = text;
+  $("answer-a").classList.toggle("thinking", !!waiting);
+}
+
+// Hide the "SOURCES: 3, 7" bookkeeping line while the answer streams in.
+function visibleText(t) {
+  let out = t.replace(/^\W*sources\W*:.*$/gim, "");
+  const lines = out.split("\n");
+  const last = lines[lines.length - 1].trim();
+  if (last && /^\W*s(o(u(r(c(e(s)?)?)?)?)?)?\W*$/i.test(last)) lines.pop();
+  return lines.join("\n").trim();
+}
+
+// POST and read the brain's streamed events (one JSON object per line).
+async function streamPost(path, body, onEvent, signal) {
+  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
+  if (!(res.headers.get("Content-Type") || "").includes("ndjson")) {
+    let data = {};
+    try { data = await res.json(); } catch {}
+    throw { code: data.code || "http_" + res.status, message: data.error || `The galaxy's server answered ${res.status}.` };
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) onEvent(JSON.parse(line));
+    }
+  }
+  if (buf.trim()) onEvent(JSON.parse(buf));
+}
+
+function friendly(err) {
+  if (err?.name === "AbortError") return null;
+  if (err instanceof TypeError) return "Can't reach the galaxy's server. Is its window still open? Double-click start to run it again.";
+  return err?.message || "Something went wrong. Try again.";
+}
+
+let busy = null;           // AbortController while the brain works
+function setBusy(ctl) {
+  busy = ctl;
+  $("send").textContent = ctl ? "Stop" : "Ask";
+  $("send").classList.toggle("stop", !!ctl);
+  $("think").disabled = !!ctl || !ON_THIS_COMPUTER;
+  setThinking(!!ctl);
+}
+$("send").addEventListener("click", (e) => { if (busy) { e.preventDefault(); busy.abort(); } });
 
 $("ask").addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (busy) return;
   const q = $("question").value.trim();
   if (!q) return;
-  $("send").disabled = true;
-  showAnswer({ question: q, text: "Searching your notes" });
+  const ctl = new AbortController();
+  setBusy(ctl);
+  showAnswer({ question: q, text: "Thinking" });
+  setAnswerText("Thinking", true);
+  $("question").value = "";
+  const seen = new Set();
+  let text = "", finished = false;
   try {
-    const res = await fetch("chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q, session: sessionId }) });
-    let data = {};
-    try { data = await res.json(); } catch {}
-    if (!res.ok || data.error) {
-      const ids = Array.isArray(data.nodes) ? data.nodes : [];
-      showAnswer({ question: q, text: data.error || `Server error (${res.status}).`, ids, error: true, label: "Notes that matched your question" });
-      if (ids.length) showSet(new Set(ids), true);
-    } else {
-      const ids = Array.isArray(data.nodes) ? data.nodes : [];
-      showAnswer({ question: q, text: data.answer, ids });
-      if (ids.length) showSet(new Set(ids), true); else showSet(new Set(), false);
-      $("question").value = "";
-    }
+    await streamPost("chat", { question: q, session: sessionId }, (ev) => {
+      if (ev.type === "step") {
+        if (ev.id != null && nodes[ev.id]) {
+          seen.add(ev.id);
+          addStep(ev.verb, "", ev.id);
+          focusId = ev.id;
+          highlight = new Set([...seen, ...neighbours[ev.id]]);
+          applyHighlight();
+          flyTo(byId(ev.id), 1300);
+        } else addStep(ev.verb, ev.text);
+      } else if (ev.type === "token") {
+        text += ev.text;
+        setAnswerText(visibleText(text) || "Thinking", !visibleText(text));
+      } else if (ev.type === "done") {
+        finished = true;
+        showAnswer({ question: q, text: ev.answer, ids: ev.nodes || [], keepTrail: true });
+        setBusy(null);
+        if (ev.nodes?.length) showSet(new Set(ev.nodes), true); else showSet(new Set(), false);
+      } else if (ev.type === "error") {
+        finished = true;
+        showAnswer({ question: q, text: ev.error, ids: [...seen], error: true, label: "Notes it had opened", keepTrail: true });
+      }
+    }, ctl.signal);
+    if (!finished) showAnswer({ question: q, text: (visibleText(text) ? visibleText(text) + "\n\n" : "") + "(The answer was cut off. Try again.)", ids: [...seen], error: !text, keepTrail: true });
   } catch (err) {
-    showAnswer({ question: q, text: "Could not reach the server. Is server.py running?", error: true });
+    const msg = friendly(err);
+    showAnswer({ question: q, text: msg ? msg : (visibleText(text) ? visibleText(text) + "\n\n(Stopped.)" : "(Stopped.)"), ids: [...seen], error: !!msg, label: "Notes it had opened", keepTrail: true });
   } finally {
-    $("send").disabled = false;
+    setBusy(null);
     $("question").focus();
   }
 });
 
+// ---- "Let it think": the brain reads everything on its own and reports back
+$("think").addEventListener("click", async () => {
+  if (busy) return;
+  const ctl = new AbortController();
+  setBusy(ctl);
+  clearFocus();
+  showAnswer({ question: `Thinking for itself across all ${nodes.length} notes`, text: "" });
+  setAnswerText("Reading everything. On a laptop this can take a minute or two", true);
+  graph.zoomToFit(1600, 60);
+  let insights = null;
+  try {
+    await streamPost("think", { session: sessionId }, (ev) => {
+      if (ev.type === "step") addStep(ev.verb, ev.text);
+      else if (ev.type === "progress") setAnswerText("Writing down what it noticed", true);
+      else if (ev.type === "insights") insights = ev.insights;
+      else if (ev.type === "error") throw { message: ev.error };
+    }, ctl.signal);
+    if (!insights?.length) throw { message: "The brain didn't finish its thoughts. Press Let it think to try again." };
+    setBusy(null);
+    showAnswer({ question: "What the brain noticed on its own", text: "", keepTrail: true });
+    const box = $("insights");
+    insights.forEach((ins) => {
+      const ids = (ins.notes || []).filter((i) => nodes[i]);
+      const card = document.createElement("button");
+      card.className = "insight";
+      const kind = document.createElement("span"); kind.className = "kind " + ins.kind; kind.textContent = ins.kind;
+      const h = document.createElement("span"); h.className = "headline"; h.textContent = ins.headline;
+      const d = document.createElement("span"); d.className = "detail"; d.textContent = ins.detail;
+      const n = document.createElement("span"); n.className = "on"; n.textContent = ids.map((i) => nodes[i].label).join(" · ");
+      card.append(kind, h, d, n);
+      card.onclick = () => { box.querySelectorAll(".insight").forEach((c) => c.classList.toggle("active", c === card)); if (ids.length) showSet(new Set(ids), true); };
+      box.append(card);
+    });
+    const all = new Set(insights.flatMap((x) => x.notes || []).filter((i) => nodes[i]));
+    if (all.size) showSet(all, true);
+    $("question").placeholder = "Ask a follow-up, e.g. tell me more about the first one";
+  } catch (err) {
+    const msg = friendly(err);
+    showAnswer({ question: "Thinking for itself", text: msg || "(Stopped.)", error: !!msg, keepTrail: true });
+  } finally {
+    setBusy(null);
+  }
+});
+
 $("new-convo").onclick = async () => {
-  try { await fetch("chat/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: sessionId }) }); } catch {}
+  busy?.abort();
   $("answer").classList.remove("show");
+  fetch("chat/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: sessionId }) }).catch(() => {});
+  $("question").placeholder = "Ask me anything: your notes, ideas, advice…";
   showSet(new Set(), false);
   pinned = false; pauseRotation(2000);
   $("question").focus();
