@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge Galaxy</title>
+<style>
+  :root {
+    --bg: #000006;
+    --panel: rgba(10, 12, 24, 0.78);
+    --panel-border: rgba(140, 160, 255, 0.18);
+    --text: #e8ecff;
+    --muted: #8d95b8;
+    --accent: #8fb4ff;
+    --warn: #ffcf70;
+    --radius: 14px;
+    --font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); overflow: hidden; }
+  #graph { position: fixed; inset: 0; }
+  .glass {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    border-radius: var(--radius);
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  /* ---------- header / legend */
+  #hud { position: fixed; top: 16px; left: 16px; padding: 14px 16px; max-width: 260px; z-index: 5; }
+  #hud h1 { margin: 0 0 2px; font-size: 15px; letter-spacing: 0.18em; text-transform: uppercase; font-weight: 600; }
+  #hud .stats { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  #legend { display: flex; flex-direction: column; gap: 5px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text); cursor: pointer; background: none; border: 0; padding: 2px 0; text-align: left; font-family: inherit; }
+  .legend-item:hover { color: #fff; }
+  .legend-item .count { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; box-shadow: 0 0 10px currentColor; background: currentColor; }
+  #hud .hint { margin-top: 10px; font-size: 11px; color: var(--muted); line-height: 1.5; }
+
+  /* ---------- side panel */
+  #panel {
+    position: fixed; top: 16px; right: 16px; bottom: 16px; width: min(380px, calc(100vw - 32px));
+    padding: 20px 20px 16px; z-index: 6; display: flex; flex-direction: column;
+    transform: translateX(calc(100% + 24px)); transition: transform 0.45s cubic-bezier(.2, .8, .2, 1);
+  }
+  #panel.open { transform: none; }
+  @media (min-width: 721px) { #panel { bottom: 96px; } }
+  @media (min-width: 1180px) { body.panel-open #chat { left: calc(50% - 206px); width: min(720px, calc(100vw - 460px)); } }
+  #chat { transition: left 0.45s cubic-bezier(.2, .8, .2, 1), width 0.45s; }
+  #panel .close { position: absolute; top: 12px; right: 12px; background: none; border: 0; color: var(--muted); font-size: 22px; cursor: pointer; line-height: 1; padding: 4px 8px; border-radius: 8px; }
+  #panel .close:hover { color: #fff; background: rgba(255,255,255,0.06); }
+  #panel .group { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+  #panel h2 { margin: 8px 30px 4px 0; font-size: 21px; line-height: 1.25; font-weight: 600; }
+  #panel .path { font-size: 11.5px; color: var(--muted); margin-bottom: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #panel .excerpt { flex: 1 1 auto; overflow-y: auto; white-space: pre-wrap; font-size: 13.5px; line-height: 1.6; color: #d5dbf5; padding-right: 6px; }
+  #panel h3 { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin: 14px 0 8px; font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--panel-border); background: rgba(255,255,255,0.04); color: var(--text); cursor: pointer; font-family: inherit; }
+  .chip:hover { background: rgba(255,255,255,0.1); }
+  .chip .dot { width: 7px; height: 7px; }
+  #neighbours { max-height: 30%; overflow-y: auto; }
+
+  /* ---------- chat */
+  #chat { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); width: min(720px, calc(100vw - 32px)); z-index: 7; display: flex; flex-direction: column; gap: 10px; }
+  #answer { padding: 14px 16px 12px; display: none; max-height: 40vh; overflow-y: auto; }
+  #answer.show { display: block; animation: rise 0.35s ease; }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  #answer .q { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  #answer .a { font-size: 14.5px; line-height: 1.6; white-space: pre-wrap; }
+  #answer.error .a { color: var(--warn); }
+  #answer .sources { margin-top: 10px; }
+  #answer .sources-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+  #answer .actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+  .link-btn { background: none; border: 0; color: var(--muted); font-size: 12px; cursor: pointer; font-family: inherit; padding: 2px 4px; }
+  .link-btn:hover { color: var(--text); }
+  #ask { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 18px; border-radius: 999px; }
+  #ask input { flex: 1; min-width: 0; background: none; border: 0; outline: none; color: var(--text); font-size: 15px; font-family: inherit; padding: 10px 0; }
+  #ask input::placeholder { color: #6d7497; }
+  #ask button { flex: none; border: 0; border-radius: 999px; padding: 10px 18px; font-size: 14px; font-weight: 600; font-family: inherit; cursor: pointer; color: #07091a; background: linear-gradient(135deg, #9bc0ff, #c59bff); transition: filter 0.2s, opacity 0.2s; }
+  #ask button:hover { filter: brightness(1.1); }
+  #ask button:disabled { opacity: 0.5; cursor: default; }
+  #ask:focus-within { border-color: rgba(160, 180, 255, 0.45); }
+  .thinking::after { content: ""; display: inline-block; width: 1.4em; text-align: left; animation: dots 1.2s steps(4) infinite; }
+  @keyframes dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
+
+  .scene-tooltip { font-family: var(--font) !important; font-size: 13px !important; background: rgba(8,10,22,0.85) !important; padding: 5px 10px !important; border-radius: 8px !important; border: 1px solid var(--panel-border); }
+
+  #fatal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 24px; color: var(--muted); z-index: 10; }
+  #fatal.show { display: flex; }
+
+  @media (max-width: 720px) {
+    #hud { max-width: calc(100vw - 32px); padding: 10px 12px; }
+    #legend { flex-direction: row; flex-wrap: wrap; gap: 4px 12px; }
+    .legend-item .count, #hud .hint { display: none; }
+    #panel { top: auto; left: 16px; right: 16px; bottom: 90px; width: auto; max-height: 55vh; transform: translateY(calc(100% + 120px)); }
+    #chat { bottom: 14px; }
+  }
+</style>
+</head>
+<body>
+<div id="graph"></div>
+
+<div id="hud" class="glass">
+  <h1>Knowledge Galaxy</h1>
+  <div class="stats" id="stats"></div>
+  <div id="legend"></div>
+  <div class="hint">Drag to orbit · scroll to zoom · click a star to open it</div>
+</div>
+
+<aside id="panel" class="glass" aria-hidden="true">
+  <button class="close" id="panel-close" aria-label="Close">×</button>
+  <div class="group" id="panel-group"></div>
+  <h2 id="panel-title"></h2>
+  <div class="path" id="panel-path"></div>
+  <div class="excerpt" id="panel-excerpt"></div>
+  <h3 id="neighbours-heading">Connected notes</h3>
+  <div class="chips" id="neighbours"></div>
+</aside>
+
+<div id="chat">
+  <div id="answer" class="glass" aria-live="polite">
+    <div class="q" id="answer-q"></div>
+    <div class="a" id="answer-a"></div>
+    <div class="sources" id="answer-sources"></div>
+    <div class="actions"><button class="link-btn" id="new-convo" title="Forget this conversation">New conversation</button></div>
+  </div>
+  <form id="ask" class="glass" autocomplete="off">
+    <input id="question" name="question" type="text" maxlength="1000" placeholder="Ask your notes anything…" aria-label="Ask your notes">
+    <button id="send" type="submit">Ask</button>
+  </form>
+</div>
+
+<div id="fatal"></div>
+
+<script src="graph-data.js"></script>
+<script type="module">
+const THREE_URL = "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.min.js";
+const FORCE_GRAPH_URL = "https://cdn.jsdelivr.net/npm/3d-force-graph@1.80.0/dist/3d-force-graph.min.js";
+
+const $ = (id) => document.getElementById(id);
+const fatal = (msg) => { $("fatal").textContent = msg; $("fatal").classList.add("show"); };
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src; s.onload = resolve; s.onerror = () => reject(new Error("Failed to load " + src));
+    document.head.appendChild(s);
+  });
+}
+
+let THREE;
+try {
+  if (typeof GRAPH === "undefined") throw new Error("graph-data.js missing — run: python3 build.py");
+  THREE = await import(THREE_URL);
+  window.THREE = THREE;          // 3d-force-graph picks this up, so everything shares one three.js
+  await loadScript(FORCE_GRAPH_URL);
+} catch (err) {
+  fatal("Could not start the galaxy: " + err.message);
+  throw err;
+}
+
+// ------------------------------------------------------------------ data
+const nodes = GRAPH.nodes;           // node.id === index in this array
+const links = GRAPH.links;
+const neighbours = nodes.map(() => new Set());
+const nodeLinks = nodes.map(() => []);
+links.forEach((l) => {
+  neighbours[l.source].add(l.target);
+  neighbours[l.target].add(l.source);
+  nodeLinks[l.source].push(l);
+  nodeLinks[l.target].push(l);
+});
+
+const PALETTE = ["#4cc9f0", "#f72585", "#ffb703", "#72efdd", "#b388ff", "#ff7b54", "#9ef01a", "#f9c6ff", "#5e9bff", "#ffd6a5"];
+const groups = [...new Set(nodes.map((n) => n.group))].sort();
+const groupColor = Object.fromEntries(groups.map((g, i) => [g, PALETTE[i % PALETTE.length]]));
+
+// ------------------------------------------------------------------ HUD
+$("stats").textContent = `${nodes.length} notes · ${links.length} connections`;
+groups.forEach((g) => {
+  const b = document.createElement("button");
+  b.className = "legend-item";
+  b.style.color = groupColor[g];
+  b.innerHTML = `<span class="dot"></span><span style="color:var(--text)"></span><span class="count"></span>`;
+  b.children[1].textContent = g;
+  b.children[2].textContent = nodes.filter((n) => n.group === g).length;
+  b.onclick = () => showSet(new Set(nodes.filter((n) => n.group === g).map((n) => n.id)), true);
+  $("legend").appendChild(b);
+});
+
+// ------------------------------------------------------------------ glow sprites
+function glowTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const ctx = c.getContext("2d");
+  const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+  g.addColorStop(0, "rgba(255,255,255,1)");
+  g.addColorStop(0.18, "rgba(255,255,255,0.75)");
+  g.addColorStop(0.45, "rgba(255,255,255,0.18)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const GLOW = glowTexture();
+const coreGeometry = new THREE.SphereGeometry(1, 20, 20);
+
+function nodeRadius(n) { return 2.6 + Math.sqrt(n.degree || 0) * 1.3; }
+
+function makeNodeObject(n) {
+  const color = new THREE.Color(groupColor[n.group]);
+  const group = new THREE.Group();
+  const r = nodeRadius(n);
+  const core = new THREE.Mesh(coreGeometry, new THREE.MeshBasicMaterial({ color: color.clone().lerp(new THREE.Color("#ffffff"), 0.12), transparent: true }));
+  core.scale.setScalar(r);
+  const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: GLOW, color, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }));
+  glow.scale.setScalar(r * 7);
+  group.add(glow, core);
+  n.__core = core; n.__glow = glow; n.__r = r;
+  return group;
+}
+
+// ------------------------------------------------------------------ graph
+const graph = new ForceGraph3D($("graph"), { controlType: "orbit" })
+  .backgroundColor("#000006")
+  .showNavInfo(false)
+  .graphData({ nodes: nodes.map((n) => ({ ...n })), links: links.map((l) => ({ ...l })) })
+  .nodeId("id")
+  .nodeLabel((n) => `<b>${escapeHtml(n.label)}</b> <span style="opacity:.6">· ${escapeHtml(n.group)}</span>`)
+  .nodeThreeObject(makeNodeObject)
+  .linkColor(() => "rgba(150,170,255,0.22)")
+  .linkOpacity(1)
+  .linkWidth(0)
+  .linkDirectionalParticleWidth(1.6)
+  .linkDirectionalParticleSpeed(0.006)
+  .enableNodeDrag(false)          // avoids an upstream drag-end/orbit-controls error; drag = orbit
+  .warmupTicks(80)
+  .cooldownTime(8000)
+  .onNodeClick((n) => focusNode(n.id))
+  .onBackgroundClick(() => clearFocus());
+
+graph.d3Force("charge").strength(-140);
+graph.d3Force("link").distance(55);
+
+addEventListener("resize", () => graph.width(innerWidth).height(innerHeight));
+
+const graphNodes = graph.graphData().nodes;      // same order as GRAPH.nodes
+const byId = (id) => graphNodes[id];
+
+// starfield + faint nebulae
+(function addSky() {
+  const scene = graph.scene();
+  const count = 6000, pos = new Float32Array(count * 3), col = new Float32Array(count * 3);
+  const tints = [new THREE.Color("#ffffff"), new THREE.Color("#bcd2ff"), new THREE.Color("#ffe9c4"), new THREE.Color("#d9c4ff")];
+  for (let i = 0; i < count; i++) {
+    const r = 1800 + Math.random() * 2600;
+    const t = Math.random() * Math.PI * 2, p = Math.acos(2 * Math.random() - 1);
+    pos.set([r * Math.sin(p) * Math.cos(t), r * Math.sin(p) * Math.sin(t), r * Math.cos(p)], i * 3);
+    const c = tints[(Math.random() * tints.length) | 0].clone().multiplyScalar(0.45 + Math.random() * 0.55);
+    col.set([c.r, c.g, c.b], i * 3);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  const stars = new THREE.Points(geo, new THREE.PointsMaterial({ size: 4.5, map: GLOW, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: false }));
+  stars.name = "starfield";
+  scene.add(stars);
+  ["#3a1c71", "#0f3b6e", "#4a1042"].forEach((c, i) => {
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: GLOW, color: c, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false }));
+    const a = i * 2.1;
+    s.position.set(Math.cos(a) * 1500, (i - 1) * 500, Math.sin(a) * 1500);
+    s.scale.setScalar(2600);
+    scene.add(s);
+  });
+  let t = 0;
+  (function twinkle() { t += 0.01; stars.rotation.y = t * 0.02; stars.material.opacity = 0.85 + Math.sin(t) * 0.1; requestAnimationFrame(twinkle); })();
+})();
+
+// ------------------------------------------------------------------ idle rotation
+const controls = graph.controls();
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.35;
+controls.enableDamping = true;
+let idleTimer = null, pinned = false;
+function pauseRotation(resumeAfterMs) {
+  controls.autoRotate = false;
+  clearTimeout(idleTimer);
+  if (resumeAfterMs && !pinned) idleTimer = setTimeout(() => { if (!pinned) controls.autoRotate = true; }, resumeAfterMs);
+}
+controls.addEventListener("start", () => pauseRotation(pinned ? 0 : 12000));
+graph.cameraPosition({ x: 0, y: 60, z: 520 });
+
+// ------------------------------------------------------------------ highlighting
+let highlight = null;     // Set of node ids, or null = everything normal
+let focusId = null;
+
+function applyHighlight() {
+  graphNodes.forEach((n) => {
+    if (!n.__core) return;
+    const on = !highlight || highlight.has(n.id);
+    const focus = n.id === focusId;
+    n.__core.material.opacity = on ? 1 : 0.12;
+    n.__glow.material.opacity = on ? (focus ? 1 : 0.85) : 0.07;
+    n.__glow.scale.setScalar(n.__r * (focus ? 11 : highlight && on ? 8.5 : 7));
+  });
+  const hlLink = (l) => highlight && highlight.has(l.source.id ?? l.source) && highlight.has(l.target.id ?? l.target);
+  graph
+    .linkColor((l) => (hlLink(l) ? "rgba(210,225,255,0.95)" : highlight ? "rgba(120,140,220,0.06)" : "rgba(150,170,255,0.22)"))
+    .linkWidth((l) => (hlLink(l) ? 0.9 : 0))
+    .linkDirectionalParticles((l) => (hlLink(l) ? 3 : 0));
+}
+
+function flyTo(n, ms = 1600) {
+  const d = 190, len = Math.hypot(n.x, n.y, n.z) || 1, k = 1 + d / len;
+  graph.cameraPosition({ x: n.x * k, y: n.y * k, z: n.z * k }, { x: n.x, y: n.y, z: n.z }, ms);
+}
+
+function focusNode(id) {
+  const n = byId(id);
+  if (!n) return;
+  focusId = id;
+  pinned = true;
+  pauseRotation(0);
+  highlight = new Set([id, ...neighbours[id]]);
+  applyHighlight();
+  flyTo(n);
+  openPanel(n);
+}
+
+function clearFocus() {
+  focusId = null; highlight = null; pinned = false;
+  applyHighlight();
+  closePanel();
+  pauseRotation(4000);
+}
+
+function showSet(ids, frame) {
+  focusId = null;
+  highlight = ids.size ? ids : null;
+  applyHighlight();
+  closePanel();
+  if (frame && ids.size) {
+    pinned = true; pauseRotation(0);
+    graph.zoomToFit(1400, ids.size === 1 ? 260 : 140, (n) => ids.has(n.id));
+  }
+}
+
+// ------------------------------------------------------------------ side panel
+function chip(id, onClick) {
+  const n = nodes[id];
+  const b = document.createElement("button");
+  b.className = "chip";
+  b.innerHTML = `<span class="dot"></span><span></span>`;
+  b.firstChild.style.color = groupColor[n.group];
+  b.lastChild.textContent = n.label;
+  b.onclick = onClick || (() => focusNode(id));
+  return b;
+}
+
+function openPanel(n) {
+  const src = nodes[n.id];
+  $("panel-group").innerHTML = `<span class="dot"></span><span></span>`;
+  $("panel-group").firstChild.style.color = groupColor[src.group];
+  $("panel-group").lastChild.textContent = src.group;
+  $("panel-title").textContent = src.label;
+  $("panel-path").textContent = "notes/" + src.path;
+  $("panel-excerpt").textContent = src.excerpt;
+  $("panel-excerpt").scrollTop = 0;
+  const list = $("neighbours");
+  list.replaceChildren(...[...neighbours[n.id]].sort((a, b) => nodes[a].label.localeCompare(nodes[b].label)).map((id) => chip(id)));
+  $("neighbours-heading").textContent = neighbours[n.id].size ? `Connected notes (${neighbours[n.id].size})` : "No connections yet";
+  $("panel").classList.add("open");
+  document.body.classList.add("panel-open");
+  $("panel").setAttribute("aria-hidden", "false");
+}
+function closePanel() {
+  $("panel").classList.remove("open");
+  document.body.classList.remove("panel-open");
+  $("panel").setAttribute("aria-hidden", "true");
+}
+$("panel-close").onclick = clearFocus;
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") clearFocus(); });
+
+// ------------------------------------------------------------------ chat
+let sessionId = null;
+try { sessionId = sessionStorage.getItem("galaxy-session"); } catch {}
+if (!sessionId) {
+  sessionId = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)).replace(/[^A-Za-z0-9-]/g, "");
+  try { sessionStorage.setItem("galaxy-session", sessionId); } catch {}
+}
+
+function showAnswer({ question, text, ids = [], error = false, label = "Sources" }) {
+  const box = $("answer");
+  box.classList.add("show");
+  box.classList.toggle("error", error);
+  $("answer-q").textContent = question ? "You asked: " + question : "";
+  $("answer-a").textContent = text;
+  $("answer-a").classList.toggle("thinking", text === "Searching your notes");
+  const src = $("answer-sources");
+  src.replaceChildren();
+  const valid = ids.filter((i) => Number.isInteger(i) && nodes[i]);
+  if (valid.length) {
+    const l = document.createElement("div");
+    l.className = "sources-label"; l.textContent = label;
+    const wrap = document.createElement("div");
+    wrap.className = "chips";
+    valid.forEach((id) => wrap.appendChild(chip(id)));
+    src.append(l, wrap);
+  }
+}
+
+$("ask").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const q = $("question").value.trim();
+  if (!q) return;
+  $("send").disabled = true;
+  showAnswer({ question: q, text: "Searching your notes" });
+  try {
+    const res = await fetch("chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q, session: sessionId }) });
+    let data = {};
+    try { data = await res.json(); } catch {}
+    if (!res.ok || data.error) {
+      const ids = Array.isArray(data.nodes) ? data.nodes : [];
+      showAnswer({ question: q, text: data.error || `Server error (${res.status}).`, ids, error: true, label: "Notes that matched your question" });
+      if (ids.length) showSet(new Set(ids), true);
+    } else {
+      const ids = Array.isArray(data.nodes) ? data.nodes : [];
+      showAnswer({ question: q, text: data.answer, ids });
+      if (ids.length) showSet(new Set(ids), true); else showSet(new Set(), false);
+      $("question").value = "";
+    }
+  } catch (err) {
+    showAnswer({ question: q, text: "Could not reach the server. Is server.py running?", error: true });
+  } finally {
+    $("send").disabled = false;
+    $("question").focus();
+  }
+});
+
+$("new-convo").onclick = async () => {
+  try { await fetch("chat/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: sessionId }) }); } catch {}
+  $("answer").classList.remove("show");
+  showSet(new Set(), false);
+  pinned = false; pauseRotation(2000);
+  $("question").focus();
+};
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+window.galaxy = { graph, nodes, focusNode, clearFocus, groupColor };
+</script>
+</body>
+</html>
