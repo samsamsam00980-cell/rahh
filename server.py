@@ -43,10 +43,12 @@ MAX_SESSIONS = 200
 MAX_BODY_BYTES = 16 * 1024
 MAX_QUESTION_CHARS = 1000
 
-SYSTEM_PROMPT = """You answer questions about the user's own notes.
-Answer ONLY from the notes provided below — never from general knowledge.
-Answer in two or three sentences, plainly, without markdown.
-If the notes do not cover the question, say so plainly (for example: "Your notes don't cover that.") and do not guess.
+SYSTEM_PROMPT = """You are a smart, friendly AI assistant living inside the user's "knowledge galaxy" of notes.
+The user can ask you ANYTHING: questions about their notes, general questions, advice, ideas, writing help, maths.
+Think for yourself:
+- When the question touches the notes below, use them and reason across them: connect dots, spot conflicts and implications, do the arithmetic. Say "From your notes..." for facts taken from notes, and never invent facts about the user's business that the notes do not contain.
+- For everything else, answer from your own knowledge like any capable assistant.
+Be conversational and concise: usually two to five sentences, plain text, no markdown headings.
 Earlier turns of this conversation are included so you can resolve follow-up questions.
 On the very last line write "SOURCES:" followed by the bracketed ids of the notes you actually used, comma-separated (e.g. "SOURCES: 7, 12"), or "SOURCES: none".
 
@@ -319,7 +321,7 @@ class Handler(SimpleHTTPRequestHandler):
         context = "\n\n".join(
             f"[{i}] {notes[i]['label']} (folder: {notes[i]['group']})\n{notes[i]['text'][:NOTE_CHARS_FOR_MODEL]}"
             for i in top
-        ) or "(no notes matched this question)"
+        ) or "(no notes matched this message; answer from your own knowledge)"
         messages = [{"role": "system", "content": SYSTEM_PROMPT.format(notes=context)}]
         messages += history
         messages.append({"role": "user", "content": question})
@@ -331,7 +333,7 @@ class Handler(SimpleHTTPRequestHandler):
             raise
         answer, used = split_sources(reply, top)
         if not answer:
-            answer = "Your notes don't cover that."
+            answer = "I'm not sure how to answer that one. Try asking another way."
         self.conversations.append(sid, question, answer)
         self.send_json(200, {"answer": answer, "nodes": used})
 

@@ -1,6 +1,6 @@
 # Knowledge Galaxy
 
-A 3D galaxy of your markdown notes, plus a chat "brain" that answers only from them.
+A 3D galaxy of your markdown notes, plus an AI "brain" you can ask anything. It uses your notes when they are relevant and its own knowledge otherwise.
 
 **Easiest:** double-click `start.command` (Mac) or `start.bat` (Windows). Your browser opens on the galaxy.
 
