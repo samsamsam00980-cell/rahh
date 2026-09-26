@@ -2,9 +2,15 @@
 
 A 3D galaxy of your markdown notes, plus a chat "brain" that answers only from them.
 
+**Easiest:** double-click `start.command` (Mac) or `start.bat` (Windows). Your browser opens on the galaxy.
+
+Or from a terminal:
+
 ```
-python3 server.py        # re-indexes ./notes, then serves http://127.0.0.1:4700
+python3 server.py        # re-indexes ./notes, serves http://127.0.0.1:4700 and opens your browser
 ```
+
+Set `GALAXY_NO_BROWSER=1` to skip opening the browser.
 
 - `notes/` — markdown notes (30 sample notes about Harbor Street Coffee). Sub-folder = group/colour.
 - `build.py` — standard-library indexer → `viewer/graph-data.js` (`const GRAPH = {nodes, links}`; node `id` = its index).

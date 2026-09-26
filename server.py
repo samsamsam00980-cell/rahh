@@ -20,6 +20,7 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+import webbrowser
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
@@ -344,6 +345,9 @@ def main():
     httpd = ThreadingHTTPServer((HOST, PORT), handler)
     print(f"Knowledge galaxy: http://{HOST if HOST != '0.0.0.0' else 'localhost'}:{PORT}  "
           f"({len(nodes)} notes, {len(links)} links)  Ctrl+C to stop")
+    if os.environ.get("GALAXY_NO_BROWSER") != "1":
+        url = f"http://127.0.0.1:{PORT}/"
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()   # open the galaxy for you
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
